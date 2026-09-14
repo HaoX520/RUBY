@@ -8,6 +8,7 @@ import * as worldbook from './worldbook.js';
 import * as cardwriter from './cardwriter.js';
 import { countAiReplies, getLittleWhiteBoxSummary, getShujukuBoundary, getYuzukiStatus, ordinalForIndex } from './reader.js';
 import { isDarkMode } from './settings.js';
+import { BUILTIN_REFERENCES, findShadowingKey } from './builtin-refs.js';
 
 const PANEL_ID = 'ra_panel';
 const UI_STATE_KEY = 'ruby_analyzer_ui_state';
@@ -1537,10 +1538,14 @@ function renderRefPool() {
 
     if (!ui.scanMode) {
         if (!ui.refs.length) {
-            container.innerHTML = '<div style="color:#1a1a1a;font-size:14px;padding:12px;background:#f8f8f5;border:1px dashed #999;">暂无参考条目，点击下方"扫描角色世界书"添加</div>';
+            const builtinHint = activeBuiltinRefs().length > 0
+                ? `<div style="font-size:12px;color:#1E4B8E;background:#eef3fa;border:1px solid #c5d5ec;border-radius:4px;padding:6px 10px;margin-bottom:8px;">📌 内置参考：${h(activeBuiltinRefs().map((b) => b.label).join('、'))}（无需扫描，所有任务的参考勾选中可用，新建任务默认勾选；若世界书存在同名条目则自动改用你的条目）</div>`
+                : '';
+            container.innerHTML = `${builtinHint}<div style="color:#1a1a1a;font-size:14px;padding:12px;background:#f8f8f5;border:1px dashed #999;">暂无参考条目，点击下方"扫描角色世界书"添加</div>`;
             return;
         }
         container.innerHTML = `
+        ${activeBuiltinRefs().length > 0 ? `<div style="font-size:12px;color:#1E4B8E;background:#eef3fa;border:1px solid #c5d5ec;border-radius:4px;padding:6px 10px;margin-bottom:8px;">📌 内置参考：${h(activeBuiltinRefs().map((b) => b.label).join('、'))}（无需扫描，所有任务的参考勾选中可用，新建任务默认勾选；若世界书存在同名条目则自动改用你的条目）</div>` : ''}
         <div class="ref-group ${ui.refAddedCollapsed ? 'collapsed' : ''}">
             <div class="ref-group-header" data-ref-group="added">
                 <span class="fold-arrow">▼</span>
@@ -1954,15 +1959,35 @@ function renderTaskSlots() {
     updateRefCheckboxes();
 }
 
+/**
+ * 当前可勾选的内置参考条目：参考池中存在同关键词条目时该内置项被遮蔽（隐藏），
+ * 此时勾选"约束库"勾的是创作者自己加入池中的条目；引擎侧始终世界书优先，
+ * 无论面板状态如何都会正确解析（世界书有同名条目即使用户条目，读不到才用内置内容）。
+ * 注意：只看已加入参考池的条目——扫描到但未加入参考池的同关键词条目不遮蔽
+ * （那不是"已创造的参考条目"，隐藏会导致默认勾选丢失可勾复选框）。
+ */
+function activeBuiltinRefs() {
+    const candidates = (ui.refs || []).map((r) => r.entryKey);
+    return BUILTIN_REFERENCES.filter((b) => !findShadowingKey(b, candidates));
+}
+
 function updateRefCheckboxes() {
+    const activeBuiltins = activeBuiltinRefs();
     document.querySelectorAll('.task-refs').forEach((el) => {
         const id = parseInt(el.dataset.id, 10);
         const task = ui.tasks.find((t) => t.id === id);
         const used = task?.useReferences || [];
-        el.innerHTML = ui.refs.map((ref) => {
-            const checked = used.includes(ref.varName) ? 'checked' : '';
-            return `<label><input type="checkbox" class="ref-cb" data-id="${id}" data-var="${h(ref.varName)}" ${checked}> ${h(ref.label || ref.varName)}</label>`;
-        }).join('') || '<span style="color:#555;font-size:13px;">无</span>';
+        const items = [
+            ...ui.refs.map((ref) => {
+                const checked = used.includes(ref.varName) ? 'checked' : '';
+                return `<label><input type="checkbox" class="ref-cb" data-id="${id}" data-var="${h(ref.varName)}" ${checked}> ${h(ref.label || ref.varName)}</label>`;
+            }),
+            ...activeBuiltins.map((b) => {
+                const checked = used.includes(b.varName) ? 'checked' : '';
+                return `<label title="插件内置的约束库内容（反八股检查标准）。若世界书存在同名条目则本项自动隐藏，分析时改用你的条目。"><input type="checkbox" class="ref-cb" data-id="${id}" data-var="${h(b.varName)}" ${checked}> ${h(b.label)}（内置）</label>`;
+            }),
+        ];
+        el.innerHTML = items.join('') || '<span style="color:#555;font-size:13px;">无</span>';
     });
 
     const outputVars = ui.tasks.map((t) => ({ varName: t.outputVarName || `task_${t.id}_Output`, label: t.displayName || `任务#${t.id}`, id: t.id }));
@@ -2212,12 +2237,21 @@ function wireTaskControls() {
             window.toastr?.warning?.('⚠️ 未打开角色卡：任务将暂存于全局层，不会随角色卡导出。建议打开角色卡后再配置');
         }
         ui.tasks = collectTasksFromUI();
+        // 新建任务默认勾选内置约束库；同关键词用户条目存在时（内置被遮蔽）默认勾选用户的条目
+        const defaultRefVars = [];
+        for (const b of BUILTIN_REFERENCES) {
+            const shadowKey = findShadowingKey(b, (ui.refs || []).map((r) => r.entryKey));
+            const shadowRef = shadowKey ? (ui.refs || []).find((r) => String(r.entryKey || '') === shadowKey) : null;
+            const varName = shadowRef?.varName || b.varName;
+            if (varName && !defaultRefVars.includes(varName)) defaultRefVars.push(varName);
+        }
         const newTask = config.normalizeTask({
             id: ui.nextTaskId++,
             enabled: true,
             displayName: `任务${ui.tasks.length + 1}`,
             cyclePositions: [10],
             outputVarName: `task_${ui.nextTaskId - 1}_Output`,
+            useReferences: defaultRefVars,
         });
         ui.tasks.push(newTask);
         ui.expandedTasks.add(newTask.id);

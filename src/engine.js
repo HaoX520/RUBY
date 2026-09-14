@@ -4,6 +4,7 @@ import * as scheduler from './scheduler.js';
 import * as reader from './reader.js';
 import * as worldbook from './worldbook.js';
 import * as ai from './ai.js';
+import { BUILTIN_REFERENCES } from './builtin-refs.js';
 import { buildMessages } from './jailbreak.js';
 
 const state = {
@@ -339,6 +340,14 @@ export async function runPipeline(taskBatch) {
             if (content) log(`reference loaded: ${ref.varName}`);
         }
 
+        // 内置参考（约束库）：世界书同名条目优先——创作者自行创建同关键词条目即自动接管（无论是否加入参考池），读不到才用内置内容
+        for (const b of BUILTIN_REFERENCES) {
+            if (referenceValues[b.varName] !== undefined) continue;
+            const fromWorld = await worldbook.readEntry(charBook, chatBook, b.entryKey, true);
+            referenceValues[b.varName] = fromWorld || b.content;
+            log(`builtin reference '${b.entryKey}': ${fromWorld ? 'using worldbook entry (user overrides builtin)' : 'using builtin content'}`);
+        }
+
         const outputValues = {};
         if (startupTask?.outputKey) {
             outputValues.startupOutput = await worldbook.readEntry(charBook, chatBook, startupTask.outputKey, true);
@@ -516,7 +525,8 @@ export async function runPipeline(taskBatch) {
                     const content = variables[varName];
                     if (content && content !== '（未设定）') {
                         const refConfig = referencePool.find((r) => r.varName === varName);
-                        const displayLabel = refConfig?.label || refConfig?.entryKey || varName;
+                        const builtinDef = BUILTIN_REFERENCES.find((b) => b.varName === varName);
+                        const displayLabel = refConfig?.label || refConfig?.entryKey || builtinDef?.label || varName;
                         refSections.push(`【${displayLabel}】\n${content}`);
                     }
                 }
