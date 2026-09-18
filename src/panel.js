@@ -856,7 +856,7 @@ function wireGlobalInteractions() {
     }, { passive: false });
 }
 
-function renderStatus(layer, source) {
+async function renderStatus(layer, source) {
     const el = $('ra_status');
     if (!el) return;
     const es = engine.getEngineState();
@@ -872,17 +872,52 @@ function renderStatus(layer, source) {
         return;
     }
 
+    let chatBook = '';
+    try { chatBook = await worldbook.getChatBookName(); } catch (e) { chatBook = ''; }
+
     const engineLine = es.armed
         ? `<span class="status-ok">🟢 后台监听运行中</span>`
         : (layer === 'character'
             ? '<span class="status-warn">🟡 待机：当前配置层没有启用的任务</span>'
             : '<span class="status-warn">🟡 待机：配置未绑定角色卡——保存修改将自动写入当前卡，或到"角色绑定"页立即绑定</span>');
 
+    const bookLine = chatBook
+        ? `<span style="font-size:12px;color:#666;">📚RUBY绑定聊天世界书：</span><a class="status-ok ra-chat-book-link" style="font-size:12px;cursor:pointer;text-decoration:underline;">${h(chatBook)}</a>`
+        : `<span style="font-size:12px;color:#666;">📚RUBY绑定聊天世界书：</span><span class="status-warn" style="font-size:12px;">未绑定</span>`;
+
     el.innerHTML = `
         <span class="status-ok">✓ 系统就绪</span>（配置层：${layerText} · ${h(identity.name)}）<br>
         ${engineLine}${es.running ? ' · <span style="color:#1E4B8E;">⚙️ 正在执行分析…</span>' : ''}<br>
-        <span style="font-size:12px;color:#666;">AI回复：${es.aiCount} 层 · 周期位置：${es.position}/${es.cycleLength || '-'} ${es.lastRunSummary ? `· 上次执行：${h(es.lastRunSummary)}` : ''}</span>
+        <span style="font-size:12px;color:#666;">AI回复：${es.aiCount} 层 · 周期位置：${es.position}/${es.cycleLength || '-'} ${es.lastRunSummary ? `· 上次执行：${h(es.lastRunSummary)}` : ''}</span><br>
+        ${bookLine}
         ${es.lastError ? `<br><span class="status-err">上次错误：${h(es.lastError)}</span>` : ''}`;
+
+    const bookLink = el.querySelector('.ra-chat-book-link');
+    if (bookLink) on(bookLink, 'click', () => openChatBook(chatBook));
+}
+
+/** 点击聊天世界书：关闭 RUBY 面板 → 打开世界/知识书抽屉 → 自动选中绑定的聊天世界书。
+ *  复刻 ST 官方 openWorldInfoEditor 的实现（getContext 未暴露该函数，
+ *  但 ST 的「Chat Lore」按钮点击时内部就是调它）。 */
+function openChatBook(bookName) {
+    if (!bookName) return;
+    closePanel();
+    const jq = window.jQuery || window.$;
+    if (!jq) return;
+    try {
+        // 1. 打开 WI 抽屉（若当前未显示）
+        if (!jq('#WorldInfo').is(':visible')) {
+            jq('#WIDrawerIcon').trigger('click');
+        }
+        // 2. 按书名在 world_names 中的索引选中同名世界书
+        const names = ctx()?.getWorldInfoNames?.() || [];
+        const index = names.indexOf(bookName);
+        if (index >= 0) {
+            jq('#world_editor_select').val(index).trigger('change');
+        }
+    } catch (e) {
+        console.warn('[RUBY] open chat book failed:', bookName, e?.message || e);
+    }
 }
 
 function renderPresetDisplay(data, layer) {
