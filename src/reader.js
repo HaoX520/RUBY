@@ -147,7 +147,8 @@ export function incrementalRead(taskKey, customTags = [], options = {}) {
 
     const bookmark = getBookmark(taskKey);
     // 总结接口启用时取消20楼窗口限制：窗口内靠前楼层将被总结替代，实际token成本很小
-    const startFloor = (options.noWindowLimit && bookmark > 0)
+    // （书签为0的首次运行同样取消：从第1楼起读，边界前楼层由总结替代，只受20万字上限约束）
+    const startFloor = options.noWindowLimit
         ? bookmark + 1
         : Math.max(
             bookmark > 0 ? bookmark + 1 : 1,
