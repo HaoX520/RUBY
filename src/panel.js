@@ -113,6 +113,29 @@ function activePositionsOf(task) {
     return raw.filter((n) => n > 0);
 }
 
+/**
+ * 当前激活方案下，当前角色卡是否存在"会实际执行"的启用任务
+ * （含开局任务）。无任务时不应触碰聊天世界书——避免一打开面板
+ * 就生成空的 RUBY 聊天世界书。
+ */
+function hasRunnableTasks(data) {
+    const cfgData = data || config.resolveConfig().data;
+    const preset = config.getActivePreset(cfgData);
+    const identity = config.getCharacterIdentity();
+    if (!identity) return false;
+    if (preset.startupTask?.enabled && scheduler.taskMatchesCharacter(preset.startupTask, identity)) return true;
+    return (preset.tasks || []).some((t) => t.enabled && scheduler.taskMatchesCharacter(t, identity));
+}
+
+/** 仅在存在启用任务时才重建引擎；无任务时保持待机，避免创建聊天世界书 */
+function reinitEngineIfNeeded() {
+    if (hasRunnableTasks()) {
+        engine.reinit();
+    } else {
+        log('skip engine.reinit: 当前方案无启用任务，保持待机（不生成聊天世界书）');
+    }
+}
+
 export function openPanel(mode) {
     buildPanel();
     const root = $(PANEL_ID);
@@ -872,8 +895,12 @@ async function renderStatus(layer, source) {
         return;
     }
 
+    // 无启用任务时不查询聊天世界书，避免打开面板即创建空世界书
+    const runnable = hasRunnableTasks();
     let chatBook = '';
-    try { chatBook = await worldbook.getChatBookName(); } catch (e) { chatBook = ''; }
+    if (runnable) {
+        try { chatBook = await worldbook.getChatBookName(); } catch (e) { chatBook = ''; }
+    }
 
     const engineLine = es.armed
         ? `<span class="status-ok">🟢 后台监听运行中</span>`
@@ -883,7 +910,9 @@ async function renderStatus(layer, source) {
 
     const bookLine = chatBook
         ? `<span style="font-size:12px;color:#666;">📚RUBY绑定聊天世界书：</span><a class="status-ok ra-chat-book-link" style="font-size:12px;cursor:pointer;text-decoration:underline;">${h(chatBook)}</a>`
-        : `<span style="font-size:12px;color:#666;">📚RUBY绑定聊天世界书：</span><span class="status-warn" style="font-size:12px;">未绑定</span>`;
+        : (runnable
+            ? `<span style="font-size:12px;color:#666;">📚RUBY绑定聊天世界书：</span><span class="status-warn" style="font-size:12px;">未绑定</span>`
+            : `<span style="font-size:12px;color:#999;">📚RUBY绑定聊天世界书：</span><span style="font-size:12px;color:#999;">无启用任务，不会创建</span>`);
 
     el.innerHTML = `
         <span class="status-ok">✓ 系统就绪</span>（配置层：${layerText} · ${h(identity.name)}）<br>
@@ -1083,7 +1112,7 @@ function renderPresetList(data) {
             if (!window.confirm(`确定切换到"${target?.name || presetId}"方案吗？`)) return;
             withConfigData((d) => { d.activePresetId = presetId; });
             window.toastr?.success?.('已切换配置方案');
-            engine.reinit();
+            reinitEngineIfNeeded();
             refreshAll();
         });
     });
@@ -1542,7 +1571,7 @@ function renderSummaryProviders(data) {
             const cur = config.resolveConfig().data.summaryProvider || '';
             const next = cur === p.id ? '' : p.id;
             withConfigData((d) => { d.summaryProvider = next; });
-            engine.reinit();
+            reinitEngineIfNeeded();
             refreshAll();
             window.toastr?.success?.(next ? `已启用总结接口：${p.name}（周期与书签计算不受影响）` : '已停用总结接口，恢复纯原文模式');
         });
@@ -2307,7 +2336,7 @@ function wireTaskControls() {
             await saveCurrentSchemeFromUI();
             config.flushCardPersistNow().catch(() => { /* flush 内部已上报错误 */ });
             window.toastr?.success?.('已保存当前方案配置');
-            engine.reinit();
+            reinitEngineIfNeeded();
             refreshAll();
         } catch (e) {
             window.toastr?.error?.('保存失败: ' + e.message);
@@ -2340,7 +2369,7 @@ function wireTaskControls() {
         if (!window.confirm(`确定将"${preset?.name || ui.editingPresetId}"设为当前使用的方案吗？`)) return;
         withConfigData((d) => { d.activePresetId = ui.editingPresetId; });
         window.toastr?.success?.('已激活该方案');
-        engine.reinit();
+        reinitEngineIfNeeded();
         renderSchemeTabs();
         loadSchemeToUI(ui.editingPresetId);
         refreshAll();
@@ -2369,7 +2398,7 @@ function wireTaskControls() {
         loadSchemeToUI(ui.editingPresetId);
         renderSchemeTabs();
         window.toastr?.info?.('已删除方案');
-        engine.reinit();
+        reinitEngineIfNeeded();
         refreshAll();
     });
 
@@ -2429,7 +2458,7 @@ function wireBindingControls() {
         }
         if (config.bindToCharacter()) {
             window.toastr?.success?.('已将当前配置写入角色卡并绑定（随卡片导出）');
-            engine.reinit();
+            reinitEngineIfNeeded();
             refreshAll();
         }
     });
@@ -2553,7 +2582,7 @@ function wirePresetIoControls() {
                     已导入：${parsed.presetCount} 个方案 · ${parsed.taskCount} 个任务
                 </div>`;
             window.toastr?.success?.(`配置模板已导入（${parsed.presetCount} 个方案、${parsed.taskCount} 个任务）`);
-            engine.reinit();
+            reinitEngineIfNeeded();
             refreshAll();
         } catch (err) {
             window.toastr?.error?.('导入失败: ' + err.message);
