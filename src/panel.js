@@ -6,7 +6,7 @@ import * as engine from './engine.js';
 import * as ai from './ai.js';
 import * as worldbook from './worldbook.js';
 import * as cardwriter from './cardwriter.js';
-import { countAiReplies, getLittleWhiteBoxSummary, getShujukuBoundary, getYuzukiStatus, ordinalForIndex } from './reader.js';
+import { countAiReplies, getLittleWhiteBoxSummary, getShujukuBoundary, getYuzukiStatus, getBaibaibookStatus, ordinalForIndex } from './reader.js';
 import { isDarkMode } from './settings.js';
 import { BUILTIN_REFERENCES, findShadowingKey } from './builtin-refs.js';
 
@@ -149,9 +149,14 @@ export function openPanel(mode) {
     root.style.display = 'flex';
 }
 
-function closePanel() {
+export function closePanel() {
     const root = $(PANEL_ID);
     if (root) root.style.display = 'none';
+}
+
+export function isPanelOpen() {
+    const root = $(PANEL_ID);
+    return !!root && root.style.display !== 'none';
 }
 
 /** 主题切换按钮：🌙=当前白天（点击进黑夜） ☀️=当前黑夜（点击回白天） */
@@ -1484,6 +1489,11 @@ const SUMMARY_PROVIDERS = [
         name: '柚月记忆表（yuzuki-Memory）总结',
         description: '读取yuzuki-Memory写入聊天元数据的记忆总结表（总结标题/核心角色/楼层/总结内容/未解决问题），已总结楼层用总结替代原文；剧情摘要时间线可一并注入。',
     },
+    {
+        id: 'baibaibook',
+        name: '柏宝书（BaiBaiBook）记忆快照',
+        description: '读取柏宝书记忆引擎的结构化快照（状态/主角/NPC含好感/物品/计划/场景/生活档案等），已总结楼层用快照内容替代原文。',
+    },
 ];
 
 function renderSummaryProviders(data) {
@@ -1534,6 +1544,20 @@ function renderSummaryProviders(data) {
             } else {
                 statusHtml = `<div style="font-size:12px;color:#8B4513;margin-top:8px;">
                     ⚠️ 当前聊天未检测到柚月记忆表数据（未安装 yuzuki-Memory、或本聊天还没生成记忆总结）。启用后分析会先回退纯原文模式，检测到数据后自动生效。
+                </div>`;
+            }
+        } else if (p.id === 'baibaibook') {
+            const bbb = getBaibaibookStatus();
+            if (bbb) {
+                const c = ctx();
+                const boundaryOrdinal = ordinalForIndex(c?.chat || [], bbb.boundary);
+                const totalFloors = countAiReplies(c?.chat || []);
+                statusHtml = `<div style="font-size:12px;color:#666;margin-top:8px;">
+                    ✅ 检测到记忆快照：修订版本 ${bbb.revision}，覆盖至第 <strong>${boundaryOrdinal}</strong> 楼（共${totalFloors}楼）。快照内容将在分析时从柏宝书全局API读取。
+                </div>`;
+            } else {
+                statusHtml = `<div style="font-size:12px;color:#8B4513;margin-top:8px;">
+                    ⚠️ 当前聊天未检测到柏宝书记忆数据（未安装柏宝书、或本聊天还没生成记忆摘要）。启用后分析会先回退纯原文模式，检测到数据后自动生效。
                 </div>`;
             }
         }
