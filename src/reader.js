@@ -147,8 +147,7 @@ export function incrementalRead(taskKey, customTags = [], options = {}) {
 
     const bookmark = getBookmark(taskKey);
     // 总结接口启用时取消20楼窗口限制：窗口内靠前楼层将被总结替代，实际token成本很小
-    // （书签为0的首次运行同样取消：从第1楼起读，边界前楼层由总结替代，只受20万字上限约束）
-    const startFloor = options.noWindowLimit
+    const startFloor = (options.noWindowLimit && bookmark > 0)
         ? bookmark + 1
         : Math.max(
             bookmark > 0 ? bookmark + 1 : 1,
@@ -494,4 +493,203 @@ export function getYuzukiStatus() {
     const boundary = yuzukiBoundary(records);
     if (boundary < 0) return null;
     return { records: records.length, boundary };
+}
+
+// ---------- 柏宝书（BaiBaiBook）记忆快照接口 ----------
+// 只读 globalThis.STBaiBaiBook.getSnapshot()，不 import 柏宝书模块，零耦合。
+// 快照的 point.floor（零基 mesid）与小白x lastSummarizedMesId 同语义，
+// 直接进引擎的 ordinalForIndex 转换为 AI 楼层序数。
+
+const BAIBAIBOOK_MAX_TOTAL_CHARS = 40000;
+
+const AFFINITY_INNER_LABELS = {
+    '-2': '强烈反感', '-1': '不喜欢', '0': '无明显好恶', '1': '有好感', '2': '感情深厚',
+};
+const AFFINITY_OUTER_LABELS = {
+    '-2': '明显敌对', '-1': '冷淡疏远', '0': '不明显亲近或排斥', '1': '友善亲近', '2': '明显亲近、积极表达',
+};
+
+function baibaibookAffinityLabel(value, labels) {
+    if (value === null || value === undefined) return '';
+    const key = String(value);
+    return labels[key] || key;
+}
+
+/** 安全读取柏宝书全局 API 快照，不可用时返回 null */
+function baibaibookSnapshot() {
+    const api = globalThis.STBaiBaiBook;
+    if (!api || typeof api.getSnapshot !== 'function') return null;
+    try {
+        return api.getSnapshot();
+    } catch {
+        return null;
+    }
+}
+
+/** 把柏宝书快照渲染为可分析的紧凑文本（全板块） */
+function renderBaibaibookSummary(s) {
+    if (!s) return '';
+    const lines = [];
+
+    // 覆盖完整性
+    if (s.coverage && s.coverage.complete === false) {
+        const missing = Array.isArray(s.coverage.missingAiFloors) ? s.coverage.missingAiFloors : [];
+        if (missing.length > 0) {
+            lines.push(`⚠️ 记忆不完整：缺失AI楼层 ${missing.join('、')}`);
+        }
+    }
+
+    // 当前状态
+    if (s.state) {
+        const parts = [];
+        if (s.state.time) parts.push(`时间: ${s.state.time}`);
+        if (s.state.location) parts.push(`地点: ${s.state.location}`);
+        if (Array.isArray(s.state.locationPath) && s.state.locationPath.length > 0) {
+            parts.push(`位置: ${s.state.locationPath.join(' > ')}`);
+        }
+        if (parts.length > 0) lines.push(`【当前状态】\n${parts.join('；')}`);
+    }
+
+    // 主角
+    if (s.protagonist) {
+        const p = s.protagonist;
+        const parts = [];
+        if (p.gender) parts.push(`性别: ${p.gender}`);
+        if (p.identity) parts.push(`身份: ${p.identity}`);
+        if (p.appearance) parts.push(`外貌: ${p.appearance}`);
+        if (p.outfit) parts.push(`穿着: ${p.outfit}`);
+        if (p.condition) parts.push(`状态: ${p.condition}`);
+        if (parts.length > 0) lines.push(`【主角】\n${parts.join('；')}`);
+    }
+
+    // NPC（含好感与外在态度）
+    if (Array.isArray(s.npcs) && s.npcs.length > 0) {
+        lines.push('【登场人物】');
+        for (const npc of s.npcs) {
+            const parts = [];
+            if (npc.name) parts.push(npc.name);
+            if (npc.identity) parts.push(`身份: ${npc.identity}`);
+            if (npc.appearance) parts.push(`外貌: ${npc.appearance}`);
+            if (npc.outfit) parts.push(`穿着: ${npc.outfit}`);
+            if (npc.condition) parts.push(`状态: ${npc.condition}`);
+            if (npc.personality) parts.push(`性格: ${npc.personality}`);
+            if (npc.tier) parts.push(`分级: ${npc.tier}`);
+            const inner = baibaibookAffinityLabel(npc.affinityInner, AFFINITY_INNER_LABELS);
+            const outer = baibaibookAffinityLabel(npc.affinityOuter, AFFINITY_OUTER_LABELS);
+            if (inner) parts.push(`内心好感: ${inner}`);
+            if (outer) parts.push(`外在态度: ${outer}`);
+            if (npc.affinityNote) parts.push(`好感说明: ${npc.affinityNote}`);
+            if (parts.length > 1) lines.push(`  - ${parts.join('；')}`);
+        }
+    }
+
+    // 物品清单
+    if (Array.isArray(s.items) && s.items.length > 0) {
+        lines.push('【物品清单】');
+        for (const item of s.items) {
+            const parts = [];
+            if (item.name) parts.push(item.name);
+            if (item.description) parts.push(`描述: ${item.description}`);
+            if (item.location) parts.push(`位置: ${item.location}`);
+            if (item.quantity !== undefined && item.quantity !== null) parts.push(`数量: ${item.quantity}`);
+            if (item.status) parts.push(`状态: ${item.status}`);
+            if (parts.length > 1) lines.push(`  - ${parts.join('；')}`);
+        }
+    }
+
+    // 物品变动日志（取最近20条）
+    if (Array.isArray(s.itemLog) && s.itemLog.length > 0) {
+        lines.push('【物品变动日志】');
+        for (const log of s.itemLog.slice(-20)) {
+            const parts = [];
+            if (log.action) parts.push(log.action);
+            if (log.item) parts.push(log.item);
+            if (log.detail) parts.push(log.detail);
+            if (log.floor !== undefined && log.floor !== null) parts.push(`楼层: ${log.floor}`);
+            if (parts.length > 0) lines.push(`  - ${parts.join('；')}`);
+        }
+    }
+
+    // 计划与悬念
+    if (Array.isArray(s.plans) && s.plans.length > 0) {
+        lines.push('【计划与悬念】');
+        for (const plan of s.plans) {
+            const parts = [];
+            if (plan.title) parts.push(plan.title);
+            if (plan.description) parts.push(plan.description);
+            if (plan.status) parts.push(`状态: ${plan.status}`);
+            if (parts.length > 0) lines.push(`  - ${parts.join('；')}`);
+        }
+    }
+
+    // 场景
+    if (Array.isArray(s.scenes) && s.scenes.length > 0) {
+        lines.push('【场景】');
+        for (const scene of s.scenes) {
+            const parts = [];
+            if (scene.name) parts.push(scene.name);
+            if (scene.path) parts.push(`路径: ${scene.path}`);
+            if (scene.description) parts.push(scene.description);
+            if (parts.length > 0) lines.push(`  - ${parts.join('；')}`);
+        }
+    }
+
+    // 生活档案
+    if (Array.isArray(s.lifeDetails) && s.lifeDetails.length > 0) {
+        lines.push('【生活档案】');
+        for (const detail of s.lifeDetails) {
+            const parts = [];
+            if (detail.subject) parts.push(detail.subject);
+            if (detail.text) parts.push(detail.text);
+            if (Array.isArray(detail.topics) && detail.topics.length > 0) parts.push(`话题: ${detail.topics.join('、')}`);
+            if (detail.tier) parts.push(`层级: ${detail.tier}`);
+            if (parts.length > 0) lines.push(`  - ${parts.join('；')}`);
+        }
+    }
+
+    // 自定义变量
+    if (s.vars && typeof s.vars === 'object' && Object.keys(s.vars).length > 0) {
+        lines.push('【自定义变量】');
+        for (const [key, value] of Object.entries(s.vars)) {
+            const v = typeof value === 'object' ? JSON.stringify(value) : String(value);
+            lines.push(`  ${key}: ${v}`);
+        }
+    }
+
+    let text = lines.join('\n');
+    // 防膨胀：超出上限截断（保留靠前部分）
+    if (text.length > BAIBAIBOOK_MAX_TOTAL_CHARS) {
+        text = text.slice(0, BAIBAIBOOK_MAX_TOTAL_CHARS) + '…（已截断）';
+    }
+    return text;
+}
+
+/**
+ * 读取柏宝书记忆快照并组装为可分析的紧凑文本（全板块）。
+ * @returns {{boundary: number, text: string}|null} 无插件/无快照/无覆盖楼层时返回 null（回退纯原文）
+ */
+export function getBaibaibookSummary() {
+    const snapshot = baibaibookSnapshot();
+    if (!snapshot) return null;
+    const floor = Number(snapshot.point?.floor);
+    if (!Number.isFinite(floor) || floor < 0) return null;
+    // at: "before" 时状态不含目标楼，边界退一格；at: "after"（默认）包含目标楼
+    const at = String(snapshot.point?.at || 'after');
+    const boundary = at === 'before' ? Math.max(0, floor - 1) : floor;
+    if (boundary < 0) return null;
+    const text = renderBaibaibookSummary(snapshot);
+    if (!text) return null;
+    return { boundary, text };
+}
+
+/** 面板状态探测：有快照数据时返回 { revision, boundary }，否则 null */
+export function getBaibaibookStatus() {
+    const snapshot = baibaibookSnapshot();
+    if (!snapshot) return null;
+    const floor = Number(snapshot.point?.floor);
+    if (!Number.isFinite(floor) || floor < 0) return null;
+    const at = String(snapshot.point?.at || 'after');
+    const boundary = at === 'before' ? Math.max(0, floor - 1) : floor;
+    if (boundary < 0) return null;
+    return { revision: Number(snapshot.revision) || 0, boundary };
 }

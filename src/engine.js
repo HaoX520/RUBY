@@ -396,6 +396,17 @@ export async function runPipeline(taskBatch) {
             } catch (e) {
                 warn(`yuzuki-Memory summary read failed: ${e?.message || e}`);
             }
+        } else if (provider === 'baibaibook') {
+            try {
+                const bbb = reader.getBaibaibookSummary();
+                if (bbb) {
+                    providerSummary = { boundary: bbb.boundary, text: bbb.text, label: '柏宝书·记忆快照' };
+                } else {
+                    warn('baibaibook summary unavailable (not installed or no snapshot), falling back to raw text');
+                }
+            } catch (e) {
+                warn(`baibaibook summary read failed: ${e?.message || e}`);
+            }
         }
 
         for (let taskIndex = 0; taskIndex < taskBatch.length; taskIndex++) {
