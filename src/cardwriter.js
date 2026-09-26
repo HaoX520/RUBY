@@ -492,74 +492,204 @@ function extractPromptNames(yamlText) {
     return [...new Set(names)];
 }
 
-/** 主角色条目排序：角色内容按顺序排在角色后（order 100+N），世界/NPC/速览在角色前（order 小） */
-function draftEntrySpec(stepId, yamlText) {
+// ---------- 人物身份相似度（同名人物→更新原条目，不同人物→另存新条目） ----------
+
+function normName(s) {
+    return String(s || '').toLowerCase().replace(/[\s_-]+/g, '').replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+export function namesSimilar(a, b) {
+    const na = normName(a);
+    const nb = normName(b);
+    if (!na || !nb) return false;
+    if (na === nb) return true;
+    if (na.length >= 2 && nb.length >= 2) return na.includes(nb) || nb.includes(na);
+    return false;
+}
+
+/** 按 yaml 顶层键（列首 key: 行）把一个 yaml 块拆成每人物一节 */
+function splitTopLevelSections(yaml) {
+    const lines = String(yaml || '').split('\n');
+    const sections = [];
+    let cur = null;
+    let prelude = [];
+    for (const line of lines) {
+        const m = line.match(/^([^\s#:'"][^:]{0,30}?):(?:[ \t]|$)/);
+        if (m) {
+            if (cur) sections.push(cur);
+            cur = { name: m[1].trim(), lines: [line] };
+        } else if (cur) {
+            cur.lines.push(line);
+        } else if (line.trim()) {
+            prelude.push(line);
+        }
+    }
+    if (cur) sections.push(cur);
+    if (sections.length > 0 && prelude.length > 0) {
+        sections[0].lines = [...prelude, ...sections[0].lines];
+    }
+    return sections;
+}
+
+/**
+ * Step5 完成块 → 每人物一节。格式约定（见 Step5 指令"每个NPC或分组独立一个yaml"）：
+ * 完成块内多个 ```yaml 围栏块，块顶层键 = NPC名/组名；AI 偶尔把多个 NPC 挤进一个块，
+ * 再按顶层键二次拆分。结构性顶层段（关系等跨人物字段）并入第一节。
+ * 返回 [{ name, text }]（text 为带围栏的 yaml），无法拆分时返回单节全文。
+ */
+export function splitStep5Sections(completion) {
+    const blocks = yamlBlocks(completion);
+    const source = blocks.length > 0
+        ? blocks
+        : [String(completion || '').replace(/<\/?step5_npc_design>/g, '').trim()];
+    let sections = [];
+    for (const block of source) {
+        const parts = splitTopLevelSections(block);
+        if (parts.length === 0) continue;
+        if (parts.length === 1) {
+            sections.push({ name: parts[0].name, lines: parts[0].lines });
+            continue;
+        }
+        const named = parts.filter((p) => !STRUCTURAL_KEYS.has(p.name));
+        const shared = parts.filter((p) => STRUCTURAL_KEYS.has(p.name));
+        const target = named.length > 0 ? named : parts;
+        if (shared.length > 0 && target.length > 0) {
+            target[0].lines = [...shared.flatMap((p) => p.lines), ...target[0].lines];
+        }
+        sections.push(...target);
+    }
+    sections = sections.filter((s) => s.name && s.lines.some((l) => l.trim()));
+    if (sections.length === 0) {
+        const fallback = source.join('\n\n').trim();
+        return fallback ? [{ name: '', text: fallback }] : [];
+    }
+    return sections.map((s) => ({ name: s.name, text: '```yaml\n' + s.lines.join('\n').trim() + '\n```' }));
+}
+
+/**
+ * 各步骤草稿条目规划（一次完成块 → 一或多条草稿条目）。
+ * 人物型步骤（Step3/4/5/8）按人物身份分条目：同名人物重跑→更新原条目，
+ * 不同人物（相似度低）→另存新条目，支持反复添加新人物。
+ * 每条 spec：{ key, comment, position, order, constant, disable, names, keys, content, multi }
+ *   names: 人物身份列表（用于与已有条目做相似度匹配，更新时并入关键词）；
+ *   keys:  新条目的完整关键词；multi: 多轮累积步骤（不自动推进）
+ */
+export function draftEntrySpecs(stepId, yamlText) {
     const idx = draftOrderIndex(stepId);
     const seq = idx >= 0 ? idx : 90;
     switch (stepId) {
         case 'Step0':
         case 'Step1':
         case 'Step2':
-            return { key: `ruby草稿_${stepId}`, comment: `RUBY写卡草稿·${stepId}`, position: 0, order: 100 + seq, constant: false, keys: '', append: false };
+            return [{ key: `ruby草稿_${stepId}`, comment: `RUBY写卡草稿·${stepId}`, position: 0, order: 100 + seq, constant: false, disable: false, names: [], keys: [], content: yamlText, multi: false }];
         case 'Step3': {
             const name = extractCharacterName(yamlText) || '主角';
-            return { key: `ruby草稿_${stepId}`, comment: `RUBY写卡草稿·${stepId} 主角卡 ${name}`, position: 0, order: 100 + seq, constant: false, keys: name, append: false };
+            return [{ key: `ruby草稿_Step3_${name}`, comment: `RUBY写卡草稿·Step3 角色卡 ${name}`, position: 0, order: 100 + seq, constant: false, disable: false, names: [name], keys: [name], content: yamlText, multi: false }];
         }
         case 'Step4': {
             const name = extractCharacterName(yamlText) || '主角';
-            return { key: `ruby草稿_${stepId}`, comment: `RUBY写卡草稿·${stepId} NSFW档案 ${name}`, position: 0, order: 100 + seq, constant: false, keys: name, append: false };
+            return [{ key: `ruby草稿_Step4_${name}`, comment: `RUBY写卡草稿·Step4 NSFW档案 ${name}`, position: 0, order: 100 + seq, constant: false, disable: false, names: [name], keys: [name], content: yamlText, multi: false }];
         }
         case 'Step5': {
-            // NPC 设定：角色前；关键词填全部 NPC 名
-            const names = extractTopLevelKeys(yamlText);
-            return { key: `ruby草稿_${stepId}`, comment: `RUBY写卡草稿·${stepId} NPC设定`, position: 0, order: 50, constant: false, keys: names.join(', '), append: true };
+            // NPC 设定：角色前；每 NPC/分组独立条目（关键词=该 NPC 名），同名更新异名新增
+            const sections = splitStep5Sections(yamlText);
+            return sections.map((s) => ({
+                key: `ruby草稿_Step5_${s.name || 'NPC'}`,
+                comment: `RUBY写卡草稿·Step5 NPC ${s.name || 'NPC'}`,
+                position: 0, order: 50, constant: false, disable: false,
+                names: [s.name], keys: [s.name || 'NPC'], content: s.text, multi: true,
+            }));
         }
-        case 'Step6':
-            // 人物速览：角色前，关键词"人物速览" + 人物名
-            return { key: 'ruby草稿_人物速览', comment: 'RUBY写卡草稿·Step6 人物速览', position: 0, order: 40, constant: true, keys: '人物速览, ' + extractTopLevelKeys(yamlText).join(', '), append: false };
+        case 'Step6': {
+            // 人物速览：关系网跨人物，保持单条目整体更新；关键词=人物速览+人物名
+            const names = extractTopLevelKeys(yamlText);
+            return [{ key: 'ruby草稿_人物速览', comment: 'RUBY写卡草稿·Step6 人物速览', position: 0, order: 40, constant: true, disable: false, names: [], keys: ['人物速览', ...names], content: yamlText, multi: false }];
+        }
         case 'Step6.5':
-            return { key: `ruby草稿_${stepId}`, comment: 'RUBY写卡草稿·Step6.5 创作交接', position: 0, order: 30, constant: false, keys: '', append: false };
+            return [{ key: `ruby草稿_${stepId}`, comment: 'RUBY写卡草稿·Step6.5 创作交接', position: 0, order: 30, constant: false, disable: false, names: [], keys: [], content: yamlText, multi: false }];
         case 'Step7':
-            return { key: `ruby草稿_${stepId}`, comment: 'RUBY写卡草稿·Step7 分析规划', position: 0, order: 100 + seq, constant: false, keys: '', append: false };
+            return [{ key: `ruby草稿_${stepId}`, comment: `RUBY写卡草稿·Step7 分析规划`, position: 0, order: 100 + seq, constant: false, disable: false, names: [], keys: [], content: yamlText, multi: false }];
         case 'Step8': {
-            // 分析提示词：命名特质捕捉，累积进一个关闭条目
+            // 分析提示词：关闭条目；按提示词人物名集合匹配——相交更新（关键词并集），全新人物另存
             const names = extractPromptNames(yamlText);
-            return { key: `ruby草稿_${stepId}`, comment: `RUBY写卡草稿·Step8 分析提示词（关闭条目）`, position: 0, order: 200 + seq, constant: false, keys: names.join(', '), append: true, disable: true };
+            return [{
+                key: names.length > 0 ? `ruby草稿_Step8_${names[0]}` : 'ruby草稿_Step8',
+                comment: `RUBY写卡草稿·Step8 分析提示词（关闭条目）`,
+                position: 0, order: 200 + seq, constant: false, disable: true,
+                names, keys: names, content: yamlText, multi: true,
+            }];
         }
         default:
-            return { key: `ruby草稿_${stepId}`, comment: `RUBY写卡草稿·${stepId}`, position: 0, order: 90, constant: false, keys: '', append: false };
+            return [{ key: `ruby草稿_${stepId}`, comment: `RUBY写卡草稿·${stepId}`, position: 0, order: 90, constant: false, disable: false, names: [], keys: [], content: yamlText, multi: false }];
     }
 }
 
-async function writeDraft(yamlText, stepId) {
+/** 草稿保留判定（总览收尾用）：人物型步骤按前缀保留全部分条目 */
+export function isKeptDraftKey(key) {
+    const k = String(key || '');
+    return ['ruby草稿_Step0', 'ruby草稿_Step3', 'ruby草稿_Step4', 'ruby草稿_Step5', 'ruby草稿_Step8']
+        .some((p) => k.startsWith(p)) || k === 'ruby草稿_人物速览';
+}
+
+/**
+ * 解析草稿条目目标：先按人物身份相似度在同类目分条目中找已有条目（命中→更新），
+ * 未命中再按 key 精确查找，都没有才创建（key 撞名时追加序号）。
+ */
+async function resolveDraftEntry(book, entries, spec) {
+    if (spec.names.length > 0) {
+        const prefix = spec.key.includes('_') ? spec.key.slice(0, spec.key.lastIndexOf('_') + 1) : `${spec.key}_`;
+        for (const e of Object.values(entries)) {
+            const keys = Array.isArray(e?.key) ? e.key : [];
+            const primary = String(keys[0] || '');
+            if (!primary.startsWith(prefix)) continue;
+            const storedNames = keys.slice(1);
+            if (storedNames.some((s) => spec.names.some((n) => namesSimilar(s, n)))) {
+                log(`[cardwriter] draft upsert: matching existing entry ${primary} by character identity`);
+                return e;
+            }
+        }
+    }
+    if (findEntryIn(entries, spec.key)) return await ensureEntryIn(book, entries, spec.key);
+    let key = spec.key;
+    let n = 2;
+    while (findEntryIn(entries, key)) key = `${spec.key}_${n++}`;
+    return await ensureEntryIn(book, entries, key);
+}
+
+export async function writeDraft(yamlText, stepId) {
     if (!getSettings().draftToBook) return null;
     const book = await ensureDraftBook();
-    const spec = draftEntrySpec(stepId, yamlText);
+    const specs = draftEntrySpecs(stepId, yamlText);
+    if (specs.length === 0) return null;
 
     const c = ctx();
     const data = await c.loadWorldInfo(book);
     if (!data?.entries) throw new Error(`world book not found: ${book}`);
     const entries = data.entries;
-    const entry = await ensureEntryIn(book, entries, spec.key);
 
-    // 关键词合并（草稿键 + 附加键，如角色名/NPC名）
-    const extraKeys = String(spec.keys || '').split(',').map((k) => k.trim()).filter(Boolean);
-    entry.key = [...new Set([spec.key, ...extraKeys])];
-    entry.comment = spec.comment;
-    entry.content = spec.append && entry.content
-        ? `${entry.content}\n\n${yamlText}`
-        : yamlText;
-    entry.constant = !!spec.constant;
-    entry.disable = !!spec.disable;
-    entry.position = spec.position;
-    entry.order = spec.order;
-    entry.excludeRecursion = true;
-    entry.preventRecursion = true;
+    const writtenKeys = [];
+    for (const spec of specs) {
+        const entry = await resolveDraftEntry(book, entries, spec);
+        const primary = String(entry.key?.[0] || spec.key);
+        // 关键词并集：更新已有人物条目时旧关键词保留（人物名不脱落），新条目用 spec.keys
+        const oldExtras = Array.isArray(entry.key) ? entry.key.slice(1) : [];
+        entry.key = [...new Set([primary, ...oldExtras, ...spec.keys])];
+        entry.comment = spec.comment;
+        entry.content = spec.content;
+        entry.constant = !!spec.constant;
+        entry.disable = !!spec.disable;
+        entry.position = spec.position;
+        entry.order = spec.order;
+        entry.excludeRecursion = true;
+        entry.preventRecursion = true;
+        writtenKeys.push(primary);
+        log(`[cardwriter] draft written: ${primary} -> ${book} (keys: ${entry.key.join(', ')})`);
+    }
 
     await saveBook(book, data);
-    state.draftCount++;
-    log(`[cardwriter] draft written: ${spec.key} -> ${book} (keys: ${entry.key.join(', ')})`);
-    return { ...spec, key: spec.key };
+    state.draftCount += specs.length;
+    const keyLabel = writtenKeys[0] + (writtenKeys.length > 1 ? ` 等${writtenKeys.length}个条目` : '');
+    return { key: keyLabel, multi: specs.some((s) => s.multi), count: specs.length };
 }
 
 // ---------- 步骤切换 ----------
@@ -784,24 +914,29 @@ async function finalCleanup() {
     if (!data?.entries) throw new Error(`world book not found: ${book}`);
     const entries = data.entries;
 
-    // 保留的产出草稿：美学设定、角色设定、NSFW设定、NPC设定、人物速览、分析提示词
-    const KEEP_DRAFTS = new Set(['ruby草稿_Step0', 'ruby草稿_Step3', 'ruby草稿_Step4', 'ruby草稿_Step5', 'ruby草稿_人物速览', 'ruby草稿_Step8']);
+    // 保留的产出草稿：美学设定、角色卡（含分人物条目）、NSFW档案、NPC设定、人物速览、分析提示词
     const removedKeys = new Set();
+    let keptCount = 0;
     for (const [uid, e] of Object.entries(entries)) {
         if (!Array.isArray(e?.key)) continue;
         const k = e.key[0];
         const isRuby =
             k === RULES_KEY || k === PERSONA_KEY || k === APPENDIX_KEY || k === HOLD_KEY ||
             k.startsWith(STEP_PREFIX) || k.startsWith('ruby草稿_');
-        if (isRuby && !KEEP_DRAFTS.has(k)) {
+        if (isRuby && !isKeptDraftKey(k)) {
             delete entries[uid];
             removedKeys.add(k);
+        } else if (isRuby) {
+            keptCount++;
         }
     }
     await saveBook(book, data);
     reloadEditorIfShowing(book);
-    log(`[cardwriter] final cleanup: removed ${removedKeys.size} entries (${[...removedKeys].join(', ')}), kept: ${[...KEEP_DRAFTS].filter((k) => findEntryIn(entries, k)).join(', ')}`);
-    return { removed: removedKeys.size, kept: [...KEEP_DRAFTS].filter((k) => findEntryIn(entries, k)) };
+    const keptNames = Object.values(entries)
+        .filter((e) => Array.isArray(e?.key) && isKeptDraftKey(e.key[0]))
+        .map((e) => e.key[0]);
+    log(`[cardwriter] final cleanup: removed ${removedKeys.size} entries (${[...removedKeys].join(', ')}), kept: ${keptNames.join(', ')}`);
+    return { removed: removedKeys.size, kept: keptNames, keptCount };
 }
 
 async function handleGenerationEnded() {
@@ -871,8 +1006,8 @@ async function handleGenerationEnded() {
     try {
         const spec = await writeDraft(completion, stepId);
 
-        // 累积型步骤（Step5 NPC / Step8 提示词）：产物可能分多条回复，只累积不自动推进
-        if (spec?.append) {
+        // 多轮累积步骤（Step5 NPC / Step8 提示词）：可反复产出新人物，只累积不自动推进
+        if (spec?.multi) {
             state.lastAction = `${stepId} 产物已累积 → ${spec.key}（完成后可手动切换下一步骤）`;
             await writeProgress({ stepId, stepName: getStep(stepId)?.name || '' });
             notify('info', `RUBY写卡：${stepId} 产物已写入《${DRAFT_BOOK}》（${spec.key}）。该步骤可多次产出，完成后请手动切换下一步骤`);
